@@ -1,8 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
   reactCompiler: true,
+  // Required for Docker/standalone deployment
+  output: 'standalone',
 };
 
 export default nextConfig;
