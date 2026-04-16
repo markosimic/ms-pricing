@@ -1,30 +1,57 @@
-import { createClient } from '@/app/lib/supabase/server'
+import { auth } from '@/app/lib/auth'
 import { redirect } from 'next/navigation'
+import { db, dec, fromJson } from '@/app/lib/db'
 import NavBar from '@/app/components/NavBar'
 import Link from 'next/link'
 import QuotesList from '@/app/components/QuotesList'
 
 export default async function HomePage() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect('/login')
+  const session = await auth()
+  if (!session?.user) redirect('/login')
+  const { user } = session
 
-  const { data: quotes } = await supabase
-    .from('quotes')
-    .select('id, reference_code, client_name, status, created_at, final_price_chf, client_price_chf, output_currency_code, creator_email, creator_name, is_template, template_name, user_id')
-    .eq('is_template', false)
-    .order('created_at', { ascending: false })
-    .limit(200)
+  const [quotesRaw, templatesRaw] = await Promise.all([
+    db.quotes.findMany({
+      where:   { is_template: false },
+      select: {
+        id: true, reference_code: true, client_name: true, status: true,
+        created_at: true, final_price_chf: true, client_price_chf: true,
+        output_currency_code: true, creator_email: true, creator_name: true,
+        is_template: true, template_name: true, user_id: true,
+      },
+      orderBy: { created_at: 'desc' },
+      take:    200,
+    }),
+    db.quotes.findMany({
+      where:   { is_template: true },
+      select: {
+        id: true, reference_code: true, client_name: true, template_name: true,
+        created_at: true, client_price_chf: true, final_price_chf: true,
+        output_currency_code: true,
+      },
+      orderBy: { created_at: 'desc' },
+    }),
+  ])
 
-  const { data: templates } = await supabase
-    .from('quotes')
-    .select('id, reference_code, client_name, template_name, created_at, client_price_chf, final_price_chf, output_currency_code')
-    .eq('is_template', true)
-    .order('created_at', { ascending: false })
+  // Normalise Decimal → number for the client component
+  const quotes = quotesRaw.map(q => ({
+    ...q,
+    created_at:       q.created_at.toISOString(),
+    final_price_chf:  q.final_price_chf  ? dec(q.final_price_chf)  : null,
+    client_price_chf: q.client_price_chf ? dec(q.client_price_chf) : null,
+    output_currency_code: q.output_currency_code ?? 'CHF',
+    is_template: q.is_template ?? false,
+  }))
+
+  const templates = templatesRaw.map(t => ({
+    ...t,
+    final_price_chf:  t.final_price_chf  ? dec(t.final_price_chf)  : null,
+    client_price_chf: t.client_price_chf ? dec(t.client_price_chf) : null,
+  }))
 
   return (
     <div className="min-h-screen bg-gray-900">
-      <NavBar userEmail={user.email ?? ''} />
+      <NavBar userEmail={user.email} />
 
       <main className="max-w-5xl mx-auto px-4 sm:px-6 py-10">
 
@@ -58,7 +85,7 @@ export default async function HomePage() {
         </div>
 
         {/* ── Templates section ─────────────────────────────────────────── */}
-        {templates && templates.length > 0 && (
+        {templates.length > 0 && (
           <div className="mb-10">
             <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Templates</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -104,7 +131,7 @@ export default async function HomePage() {
           </Link>
         </div>
 
-        {quotes && quotes.length > 0 ? (
+        {quotes.length > 0 ? (
           <QuotesList quotes={quotes} currentUserId={user.id} />
         ) : (
           <div className="bg-gray-800 rounded-lg border border-gray-700 px-6 py-16 text-center">

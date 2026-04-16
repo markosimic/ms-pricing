@@ -1,8 +1,8 @@
 'use client'
 
 import { useState } from 'react'
-import { createClient } from '@/app/lib/supabase/client'
 import { useRouter } from 'next/navigation'
+import { toggleTemplate } from '@/app/actions/quotes'
 
 interface Props {
   quoteId: string
@@ -19,22 +19,13 @@ export default function TemplateToggleButton({ quoteId, isTemplate, templateName
     e.stopPropagation()
 
     if (!isTemplate) {
-      // Prompt for template name before saving
       const name = window.prompt('Template name (leave blank to use reference code):')
       if (name === null) return // cancelled
       setLoading(true)
-      const supabase = createClient()
-      await supabase
-        .from('quotes')
-        .update({ is_template: true, template_name: name.trim() || null })
-        .eq('id', quoteId)
+      await toggleTemplate(quoteId, true, name.trim() || null)
     } else {
       setLoading(true)
-      const supabase = createClient()
-      await supabase
-        .from('quotes')
-        .update({ is_template: false, template_name: null })
-        .eq('id', quoteId)
+      await toggleTemplate(quoteId, false, null)
     }
 
     setLoading(false)

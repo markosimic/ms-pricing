@@ -1,8 +1,4 @@
-import { createBrowserClient } from '@supabase/ssr'
-
-export function createClient() {
-  return createBrowserClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  )
-}
+// Supabase client — replaced by NextAuth (auth) + Prisma (db) during Azure migration.
+// This file is no longer imported. It is kept to avoid git rename conflicts.
+// See app/lib/auth.ts and app/lib/db.ts.
+export {}

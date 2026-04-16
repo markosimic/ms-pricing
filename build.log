@@ -1,0 +1,177 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 707B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/node:22
+#2 ...
+
+#3 [auth] library/node:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/node:22
+#2 DONE 1.1s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 69B done
+#4 DONE 0.0s
+
+#5 [ 1/11] FROM docker.io/library/node:22@sha256:ecabd1cb6956d7acfffe8af6bbfbe2df42362269fd28c227f36367213d0bb777
+#5 resolve docker.io/library/node:22@sha256:ecabd1cb6956d7acfffe8af6bbfbe2df42362269fd28c227f36367213d0bb777 0.0s done
+#5 CACHED
+
+#6 [internal] load build context
+#6 transferring context: 105.64kB 0.0s done
+#6 DONE 0.0s
+
+#7 [ 2/11] RUN apt-get update -y && apt-get install -y openssl
+#7 0.415 Get:1 http://deb.debian.org/debian bookworm InRelease [151 kB]
+#7 0.479 Get:2 http://deb.debian.org/debian bookworm-updates InRelease [55.4 kB]
+#7 0.483 Get:3 http://deb.debian.org/debian-security bookworm-security InRelease [48.0 kB]
+#7 1.051 Get:4 http://deb.debian.org/debian bookworm/main amd64 Packages [8792 kB]
+#7 1.535 Get:5 http://deb.debian.org/debian bookworm-updates/main amd64 Packages [6924 B]
+#7 2.024 Get:6 http://deb.debian.org/debian-security bookworm-security/main amd64 Packages [294 kB]
+#7 2.368 Fetched 9347 kB in 2s (4495 kB/s)
+#7 2.368 Reading package lists...
+#7 2.870 Reading package lists...
+#7 3.301 Building dependency tree...
+#7 3.404 Reading state information...
+#7 3.510 The following additional packages will be installed:
+#7 3.510   libssl-dev libssl3
+#7 3.512 Suggested packages:
+#7 3.512   libssl-doc
+#7 3.555 The following packages will be upgraded:
+#7 3.556   libssl-dev libssl3 openssl
+#7 3.672 3 upgraded, 0 newly installed, 0 to remove and 9 not upgraded.
+#7 3.672 Need to get 5908 kB of archives.
+#7 3.672 After this operation, 181 kB disk space will be freed.
+#7 3.672 Get:1 http://deb.debian.org/debian-security bookworm-security/main amd64 libssl-dev amd64 3.0.19-1~deb12u2 [2441 kB]
+#7 3.810 Get:2 http://deb.debian.org/debian-security bookworm-security/main amd64 libssl3 amd64 3.0.19-1~deb12u2 [2032 kB]
+#7 3.870 Get:3 http://deb.debian.org/debian-security bookworm-security/main amd64 openssl amd64 3.0.19-1~deb12u2 [1435 kB]
+#7 4.272 debconf: delaying package configuration, since apt-utils is not installed
+#7 4.325 Fetched 5908 kB in 0s (13.5 MB/s)
+#7 4.405 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 23258 files and directories currently installed.)
+#7 4.447 Preparing to unpack .../libssl-dev_3.0.19-1~deb12u2_amd64.deb ...
+#7 4.452 Unpacking libssl-dev:amd64 (3.0.19-1~deb12u2) over (3.0.18-1~deb12u2) ...
+#7 4.747 Preparing to unpack .../libssl3_3.0.19-1~deb12u2_amd64.deb ...
+#7 4.752 Unpacking libssl3:amd64 (3.0.19-1~deb12u2) over (3.0.18-1~deb12u2) ...
+#7 4.967 Preparing to unpack .../openssl_3.0.19-1~deb12u2_amd64.deb ...
+#7 4.970 Unpacking openssl (3.0.19-1~deb12u2) over (3.0.18-1~deb12u2) ...
+#7 5.239 Setting up libssl3:amd64 (3.0.19-1~deb12u2) ...
+#7 5.244 Setting up libssl-dev:amd64 (3.0.19-1~deb12u2) ...
+#7 5.248 Setting up openssl (3.0.19-1~deb12u2) ...
+#7 5.268 Processing triggers for libc-bin (2.36-9+deb12u13) ...
+#7 DONE 5.4s
+
+#8 [ 3/11] WORKDIR /app
+#8 DONE 0.0s
+
+#9 [ 4/11] COPY package*.json ./
+#9 DONE 0.0s
+
+#10 [ 5/11] RUN npm install
+#10 1.991 npm warn ERESOLVE overriding peer dependency
+#10 1.992 npm warn While resolving: @auth/core@0.41.0
+#10 1.992 npm warn Found: nodemailer@8.0.5
+#10 1.992 npm warn node_modules/nodemailer
+#10 1.992 npm warn
+#10 1.992 npm warn Could not resolve dependency:
+#10 1.992 npm warn peerOptional nodemailer@"^7.0.7" from next-auth@5.0.0-beta.30
+#10 1.992 npm warn node_modules/next-auth
+#10 1.992 npm warn   next-auth@"^5.0.0-beta.25" from the root project
+#10 20.41 
+#10 20.41 added 400 packages, and audited 401 packages in 20s
+#10 20.41 
+#10 20.41 151 packages are looking for funding
+#10 20.41   run `npm fund` for details
+#10 20.43 
+#10 20.43 3 vulnerabilities (2 moderate, 1 high)
+#10 20.43 
+#10 20.43 To address all issues (including breaking changes), run:
+#10 20.43   npm audit fix --force
+#10 20.43 
+#10 20.43 Run `npm audit` for details.
+#10 20.43 npm notice
+#10 20.43 npm notice New major version of npm available! 10.9.7 -> 11.12.1
+#10 20.43 npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.12.1
+#10 20.43 npm notice To update run: npm install -g npm@11.12.1
+#10 20.43 npm notice
+#10 DONE 20.8s
+
+#11 [ 6/11] COPY prisma ./prisma/
+#11 DONE 0.1s
+
+#12 [ 7/11] RUN npx prisma generate
+#12 1.651 Prisma schema loaded from prisma/schema.prisma
+#12 3.677 
+#12 3.677 ✔ Generated Prisma Client (v5.22.0) to ./node_modules/@prisma/client in 243ms
+#12 3.677 
+#12 3.677 Start by importing your Prisma Client (See: https://pris.ly/d/importing-client)
+#12 3.677 
+#12 3.677 Tip: Want real-time updates to your database without manual polling? Discover how with Pulse: https://pris.ly/tip-0-pulse
+#12 3.677 
+#12 DONE 3.9s
+
+#13 [ 8/11] COPY . .
+#13 DONE 0.0s
+
+#14 [ 9/11] RUN npm run build
+#14 0.655 
+#14 0.655 > ms-pricing@0.1.0 build
+#14 0.655 > next build
+#14 0.655 
+#14 1.585 Attention: Next.js now collects completely anonymous telemetry regarding usage.
+#14 1.585 This information is used to shape Next.js' roadmap and prioritize features.
+#14 1.585 You can learn more, including how to opt-out if you'd not like to participate in this anonymous program, by visiting the following URL:
+#14 1.585 https://nextjs.org/telemetry
+#14 1.586 
+#14 1.607 ▲ Next.js 16.2.3 (Turbopack)
+#14 1.607 - Environments: .env.local
+#14 1.607 
+#14 1.713   Creating an optimized production build ...
+#14 10.24 ✓ Compiled successfully in 8.2s
+#14 10.29   Running TypeScript ...
+#14 18.32   Finished TypeScript in 8.0s ...
+#14 18.33   Collecting page data using 9 workers ...
+#14 19.51   Generating static pages using 9 workers (0/7) ...
+#14 19.70   Generating static pages using 9 workers (1/7) 
+#14 19.90   Generating static pages using 9 workers (3/7) 
+#14 20.01   Generating static pages using 9 workers (5/7) 
+#14 20.01 ✓ Generating static pages using 9 workers (7/7) in 503ms
+#14 20.02   Finalizing page optimization ...
+#14 20.23 
+#14 20.24 Route (app)
+#14 20.24 ┌ ƒ /
+#14 20.24 ├ ○ /_not-found
+#14 20.24 ├ ƒ /api/auth/[...nextauth]
+#14 20.24 ├ ƒ /auth/callback
+#14 20.24 ├ ○ /login
+#14 20.24 ├ ƒ /quotes/[id]
+#14 20.24 └ ƒ /quotes/new
+#14 20.24 
+#14 20.24 
+#14 20.24 ƒ Proxy (Middleware)
+#14 20.24 
+#14 20.24 ○  (Static)   prerendered as static content
+#14 20.24 ƒ  (Dynamic)  server-rendered on demand
+#14 20.24 
+#14 DONE 20.4s
+
+#15 [10/11] RUN cp -r .next/static .next/standalone/.next/static
+#15 DONE 0.2s
+
+#16 [11/11] RUN cp -r public .next/standalone/public
+#16 DONE 0.2s
+
+#17 exporting to image
+#17 exporting layers
+#17 exporting layers 16.8s done
+#17 exporting manifest sha256:ea3f56940c06f742a6ca19d4ca268c79e86d1d05f91413a0204d4cdc6973e5cd 0.0s done
+#17 exporting config sha256:5509b73e28f7f2b5829b1845c9764c7f57b8b1ce69a388a427b0be3cef9a8942 0.0s done
+#17 exporting attestation manifest sha256:149a0e9851737e7f37a95713b99351be87715e01f7346571ab75f2ee94e58310 done
+#17 exporting manifest list sha256:59ef90562e24b8e4d5376024a0678a3a0cdc573118b10a9d994244afe823db46 done
+#17 naming to acrmspricing.azurecr.io/ms-pricing:v26 done
+#17 DONE 16.9s
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/15t9hz0tuwqhg2o1caaaiiufe

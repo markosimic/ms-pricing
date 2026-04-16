@@ -1,0 +1,180 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-arm64-openssl-3.0.x", "darwin-arm64"]
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+// ── Users (credentials auth) ───────────────────────────────────────────────
+
+model users {
+  id            String   @id @default(dbgenerated("NEWID()")) @db.UniqueIdentifier
+  email         String   @unique @db.NVarChar(255)
+  name          String?  @db.NVarChar(255)
+  password_hash String   @db.NVarChar(255)
+  created_at    DateTime @default(dbgenerated("GETUTCDATE()")) @db.DateTime2
+}
+
+// ── Reference / lookup tables ──────────────────────────────────────────────
+
+model service_types {
+  id   String @id @default(dbgenerated("NEWID()")) @db.UniqueIdentifier
+  name String @db.NVarChar(255)
+  slug String @db.NVarChar(100)
+
+  quotes             quotes[]
+  service_categories service_categories[]
+}
+
+model delivery_locations {
+  id              String  @id @default(dbgenerated("NEWID()")) @db.UniqueIdentifier
+  name            String  @db.NVarChar(255)
+  hourly_rate_chf Decimal @db.Decimal(10, 2)
+
+  quotes quotes[]
+}
+
+model support_levels {
+  id             String  @id @default(dbgenerated("NEWID()")) @db.UniqueIdentifier
+  name           String  @db.NVarChar(255)
+  code           String  @db.NVarChar(50)
+  uplift_decimal Decimal @db.Decimal(10, 4)
+
+  quotes quotes[]
+}
+
+model coverage_options {
+  id             String  @id @default(dbgenerated("NEWID()")) @db.UniqueIdentifier
+  name           String  @db.NVarChar(255)
+  code           String  @db.NVarChar(50)
+  uplift_decimal Decimal @db.Decimal(10, 4)
+
+  quotes quotes[]
+}
+
+model sla_sizes {
+  id             String  @id @default(dbgenerated("NEWID()")) @db.UniqueIdentifier
+  name           String  @db.NVarChar(255)
+  code           String  @db.NVarChar(50)
+  uplift_decimal Decimal @db.Decimal(10, 4)
+
+  quotes quotes[]
+}
+
+model currencies {
+  id     String @id @default(dbgenerated("NEWID()")) @db.UniqueIdentifier
+  code   String @db.NVarChar(10)
+  symbol String @db.NVarChar(10)
+  name   String @db.NVarChar(100)
+}
+
+// ── Service catalogue ──────────────────────────────────────────────────────
+
+model service_categories {
+  id              String @id @default(dbgenerated("NEWID()")) @db.UniqueIdentifier
+  name            String @db.NVarChar(255)
+  sort_order      Int
+  service_type_id String @db.UniqueIdentifier
+
+  service_types service_types @relation(fields: [service_type_id], references: [id])
+  services      services[]
+}
+
+model services {
+  id                  String   @id @default(dbgenerated("NEWID()")) @db.UniqueIdentifier
+  name                String   @db.NVarChar(255)
+  description         String?  @db.NVarChar(Max)
+  sort_order          Int
+  default_selected    Boolean  @default(false)
+  require_zuhlke_dev  Boolean  @default(false)
+  service_category_id String   @db.UniqueIdentifier
+
+  service_categories service_categories @relation(fields: [service_category_id], references: [id])
+  quote_services     quote_services[]
+}
+
+// ── Quotes ─────────────────────────────────────────────────────────────────
+
+model quotes {
+  id                          String    @id @default(dbgenerated("NEWID()")) @db.UniqueIdentifier
+  user_id                     String    @db.NVarChar(255)
+  creator_email               String?   @db.NVarChar(255)
+  creator_name                String?   @db.NVarChar(255)
+  reference_code              String    @db.NVarChar(255)
+  client_name                 String?   @db.NVarChar(255)
+  service_type_id             String?   @db.UniqueIdentifier
+  // JSON-serialised string[]: stored as NVarChar(Max) because SQL Server has no native array type
+  service_type_ids            String?   @db.NVarChar(Max)
+  developed_by_zuhlke         Boolean   @default(true)
+  service_manager_fte         Decimal?  @db.Decimal(10, 2)
+  app_engineer_fte            Decimal?  @db.Decimal(10, 2)
+  sre_devops_fte              Decimal?  @db.Decimal(10, 2)
+  fte_estimate                Decimal?  @db.Decimal(10, 2)
+  working_hours_per_month     Int?
+  delivery_location_id        String?   @db.UniqueIdentifier
+  business_criticality        Int?
+  system_complexity           String?   @db.NVarChar(50)
+  support_level_id            String?   @db.UniqueIdentifier
+  coverage_option_id          String?   @db.UniqueIdentifier
+  sla_size_id                 String?   @db.UniqueIdentifier
+  margin_pct                  Decimal?  @db.Decimal(10, 2)
+  discount_pct                Decimal?  @db.Decimal(10, 2)
+  output_currency_code        String?   @db.NVarChar(10)
+  // JSON-serialised Record<string,number>: stored as NVarChar(Max)
+  exchange_rate_snapshot      String?   @db.NVarChar(Max)
+  base_price_chf              Decimal?  @db.Decimal(15, 2)
+  internal_cost_chf           Decimal?  @db.Decimal(15, 2)
+  client_price_chf            Decimal?  @db.Decimal(15, 2)
+  final_price_chf             Decimal?  @db.Decimal(15, 2)
+  final_price_output_currency Decimal?  @db.Decimal(15, 2)
+  notes                       String?   @db.NVarChar(Max)
+  contract_duration_years     Int?
+  status                      String    @default("draft") @db.NVarChar(50)
+  finalized_at                DateTime? @db.DateTime2
+  created_at                  DateTime  @default(dbgenerated("GETUTCDATE()")) @db.DateTime2
+  is_template                 Boolean   @default(false)
+  template_name               String?   @db.NVarChar(255)
+
+  service_types      service_types?      @relation(fields: [service_type_id], references: [id])
+  delivery_locations delivery_locations? @relation(fields: [delivery_location_id], references: [id])
+  support_levels     support_levels?     @relation(fields: [support_level_id], references: [id])
+  coverage_options   coverage_options?   @relation(fields: [coverage_option_id], references: [id])
+  sla_sizes          sla_sizes?          @relation(fields: [sla_size_id], references: [id])
+  quote_services     quote_services[]
+  complexity_scores  complexity_scores[]
+}
+
+model quote_services {
+  quote_id   String @db.UniqueIdentifier
+  service_id String @db.UniqueIdentifier
+
+  quotes   quotes   @relation(fields: [quote_id],   references: [id], onUpdate: NoAction, onDelete: NoAction)
+  services services @relation(fields: [service_id], references: [id], onUpdate: NoAction, onDelete: NoAction)
+
+  @@id([quote_id, service_id])
+}
+
+// ── Complexity scoring ─────────────────────────────────────────────────────
+
+model complexity_categories {
+  id         String  @id @default(dbgenerated("NEWID()")) @db.UniqueIdentifier
+  name       String  @db.NVarChar(255)
+  weight     Decimal @db.Decimal(10, 4)
+  sort_order Int
+
+  complexity_scores complexity_scores[]
+}
+
+model complexity_scores {
+  quote_id               String  @db.UniqueIdentifier
+  complexity_category_id String  @db.UniqueIdentifier
+  score                  Decimal @db.Decimal(10, 4)
+
+  quotes                quotes                @relation(fields: [quote_id], references: [id])
+  complexity_categories complexity_categories @relation(fields: [complexity_category_id], references: [id])
+
+  @@id([quote_id, complexity_category_id])
+}

@@ -1,26 +1,4 @@
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
-
-export async function createClient() {
-  const cookieStore = await cookies()
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll()
-        },
-        setAll(cookiesToSet) {
-          try {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, options)
-            )
-          } catch {
-            // called from a Server Component — safe to ignore
-          }
-        },
-      },
-    }
-  )
-}
+// Supabase server client — replaced by NextAuth (auth) + Prisma (db) during Azure migration.
+// This file is no longer imported. It is kept to avoid git rename conflicts.
+// See app/lib/auth.ts and app/lib/db.ts.
+export {}

@@ -1,34 +1,39 @@
 'use client'
 
-import { Suspense } from 'react'
-import { useSearchParams } from 'next/navigation'
-import { createClient } from '@/app/lib/supabase/client'
+import { useState, Suspense } from 'react'
+import { useSearchParams, useRouter } from 'next/navigation'
+import { signIn } from 'next-auth/react'
 
-function MicrosoftIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 21 21" xmlns="http://www.w3.org/2000/svg">
-      <path d="M1 1H10V10H1V1Z" fill="#F25022" />
-      <path d="M11 1H20V10H11V1Z" fill="#7FBA00" />
-      <path d="M1 11H10V20H1V11Z" fill="#00A4EF" />
-      <path d="M11 11H20V20H11V11Z" fill="#FFB900" />
-    </svg>
-  )
-}
+function LoginForm() {
+  const searchParams  = useSearchParams()
+  const callbackUrl   = searchParams.get('callbackUrl') ?? '/'
+  const router        = useRouter()
 
-function LoginContent() {
-  const searchParams = useSearchParams()
-  const next = searchParams.get('next') ?? '/'
-  const authError = searchParams.get('error')
+  const [email,    setEmail]    = useState('')
+  const [password, setPassword] = useState('')
+  const [error,    setError]    = useState('')
+  const [loading,  setLoading]  = useState(false)
 
-  async function handleMicrosoftLogin() {
-    const supabase = createClient()
-    await supabase.auth.signInWithOAuth({
-      provider: 'azure',
-      options: {
-        scopes: 'email profile openid',
-        redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`,
-      },
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+
+    const result = await signIn('credentials', {
+      email:    email.trim().toLowerCase(),
+      password,
+      redirect: false,
     })
+
+    setLoading(false)
+
+    if (result?.error) {
+      setError('Invalid email or password.')
+      return
+    }
+
+    router.push(callbackUrl)
+    router.refresh()
   }
 
   return (
@@ -37,45 +42,69 @@ function LoginContent() {
 
         <div className="mb-8">
           <h1 className="text-2xl font-semibold text-gray-100 mb-1">MS Pricing</h1>
-          <p className="text-sm text-gray-400">Sign in with your Zühlke Microsoft account</p>
-          <p className="text-xs text-gray-600 mt-1">
-            Only <span className="text-gray-500">@zuehlke.com</span> and{' '}
-            <span className="text-gray-500">@zuhlke.com</span> addresses are accepted.
-          </p>
+          <p className="text-sm text-gray-400">Sign in to your account</p>
         </div>
 
-        {authError === 'auth_callback_failed' && (
+        {error && (
           <div className="mb-5 text-sm text-red-400 bg-red-900/20 border border-red-800/40 rounded-lg px-4 py-3">
-            Sign-in failed. Try again or contact IT support.
-          </div>
-        )}
-        {authError === 'domain_not_allowed' && (
-          <div className="mb-5 text-sm text-red-400 bg-red-900/20 border border-red-800/40 rounded-lg px-4 py-3">
-            Access denied. Only @zuehlke.com and @zuhlke.com accounts are permitted.
+            {error}
           </div>
         )}
 
-        <button
-          onClick={handleMicrosoftLogin}
-          className="w-full flex items-center justify-center gap-3 bg-gray-700 hover:bg-gray-600 border border-gray-600 text-white rounded-lg px-4 py-3 text-sm font-medium transition-colors"
-        >
-          <MicrosoftIcon />
-          Sign in with Microsoft
-        </button>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label htmlFor="email" className="block text-sm font-medium text-gray-300 mb-1">
+              Email
+            </label>
+            <input
+              id="email"
+              type="email"
+              autoComplete="email"
+              required
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2.5 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="you@zuehlke.com"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="password" className="block text-sm font-medium text-gray-300 mb-1">
+              Password
+            </label>
+            <input
+              id="password"
+              type="password"
+              autoComplete="current-password"
+              required
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2.5 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="••••••••"
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg px-4 py-2.5 text-sm font-medium transition-colors"
+          >
+            {loading ? 'Signing in…' : 'Sign in'}
+          </button>
+        </form>
 
         <p className="text-center text-xs text-gray-600 mt-6">
-          Access is restricted to @zuehlke.com and @zuhlke.com addresses.
+          MS Pricing · Zühlke Managed Services
         </p>
       </div>
     </div>
   )
 }
 
-// useSearchParams requires a Suspense boundary in Next.js App Router
 export default function LoginPage() {
   return (
     <Suspense>
-      <LoginContent />
+      <LoginForm />
     </Suspense>
   )
 }

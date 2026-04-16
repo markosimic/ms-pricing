@@ -1,43 +1,27 @@
-# ── Stage 1: Install dependencies ────────────────────────────────────────────
-FROM node:20-alpine AS deps
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
+FROM node:22
 
-# ── Stage 2: Build ────────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+# Standard libraries are included, but we ensure openssl is current
+RUN apt-get update -y && apt-get install -y openssl
+
 WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
+
+# Install dependencies inside the container to ensure architecture match
+COPY package*.json ./
+RUN npm install
+
+# Copy Prisma schema and generate the engine
+COPY prisma ./prisma/
+RUN npx prisma generate
+
+# Copy the rest of the application
 COPY . .
 
-# NEXT_PUBLIC_* vars are baked into the client bundle at build time
-ARG NEXT_PUBLIC_SUPABASE_URL
-ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
-ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
-ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
-ENV NEXT_TELEMETRY_DISABLED=1
-
+# Build the Next.js app
 RUN npm run build
 
-# ── Stage 3: Runtime ──────────────────────────────────────────────────────────
-FROM node:20-alpine AS runner
-WORKDIR /app
-
-ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
-
-# Non-root user for security
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
-
-COPY --from=builder /app/public ./public
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-
-USER nextjs
+# Standalone output does NOT include static assets — copy them in manually
+RUN cp -r .next/static .next/standalone/.next/static
+RUN cp -r public .next/standalone/public
 
 EXPOSE 3000
-ENV PORT=3000
-ENV HOSTNAME="0.0.0.0"
-
-CMD ["node", "server.js"]
+CMD ["node", ".next/standalone/server.js"]

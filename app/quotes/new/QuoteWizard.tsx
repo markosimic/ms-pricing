@@ -2,7 +2,7 @@
 
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '@/app/lib/supabase/client'
+import { saveQuote } from '@/app/actions/quotes'
 import InfoTooltip from '@/app/components/InfoTooltip'
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -20,6 +20,7 @@ interface ServiceCategory {
 interface DeliveryLocation { id: string; name: string; hourly_rate_chf: number }
 interface SupportLevel { id: string; name: string; code: string; uplift_decimal: number }
 interface CoverageOption { id: string; name: string; code: string; uplift_decimal: number }
+interface SlaSize { id: string; name: string; code: string; uplift_decimal: number }
 interface Currency { id: string; code: string; symbol: string; name: string }
 
 interface FormData {
@@ -34,14 +35,18 @@ interface FormData {
   service_manager_fte: string
   app_engineer_fte: string
   sre_devops_fte: string
+  base_fte_per_month: string     // billing FTE, may differ from staffing sum; saved as fte_estimate
   working_hours_per_month: number
   delivery_location_id: string
   support_level_id: string
   coverage_option_id: string
+  sla_size_id: string
+  hourly_rate_chf: number        // manual override, pre-filled from location, stored in CHF
   margin_pct: number
   discount_pct: number
   output_currency_code: string
   contract_duration_years: number
+  number_of_apps_code: string
 }
 
 export interface CloneData {
@@ -55,14 +60,18 @@ export interface CloneData {
   service_manager_fte?: string
   app_engineer_fte?: string
   sre_devops_fte?: string
+  base_fte_per_month?: string
   working_hours_per_month?: number
   delivery_location_id?: string
   support_level_id?: string
   coverage_option_id?: string
+  sla_size_id?: string
+  hourly_rate_chf?: number
   margin_pct?: number
   discount_pct?: number
   output_currency_code?: string
   contract_duration_years?: number
+  number_of_apps_code?: string
 }
 
 interface Props {
@@ -71,11 +80,10 @@ interface Props {
   deliveryLocations: DeliveryLocation[]
   supportLevels: SupportLevel[]
   coverageOptions: CoverageOption[]
+  slaSizes: SlaSize[]
   currencies: Currency[]
   exchangeRates: Record<string, number>
-  userId: string
-  userEmail: string
-  userName: string
+  // userId / userEmail / userName removed: now read server-side in the saveQuote action
   initialData?: CloneData | null
 }
 
@@ -84,16 +92,55 @@ interface Props {
 const STEPS = ['Basic Info', 'Services', 'Assessment', 'Pricing', 'Review']
 
 const CRITICALITY_OPTIONS = [
-  { value: 1, label: 'Critical',  description: 'Most (>50%) impacts are business-threatening — P1: ≤1 hr response · ≤8 hr resolution · 24×7 coverage mandatory' },
-  { value: 2, label: 'High',      description: 'Most impacts significant, some (<50%) business-threatening — P1: <4 hr response · 1 business day resolution · Extended coverage' },
-  { value: 3, label: 'Medium',    description: 'Some (<50%) impacts significant, none business-threatening — P1: 8 hr response · 48 hr resolution · Standard hours' },
-  { value: 4, label: 'Low',       description: 'Most impacts negligible, no business-threatening impacts — P1: best effort response · standard business hours' },
+  {
+    value: 1, label: 'Critical',
+    impact: 'Most (>50%) impacts are business-threatening',
+    sla: { response: '≤1 hr', resolution: '≤8 hr', coverage: '24×7 mandatory' },
+  },
+  {
+    value: 2, label: 'High',
+    impact: 'Most impacts significant, some (<50%) business-threatening',
+    sla: { response: '<4 hr', resolution: '1 business day', coverage: 'Extended hours' },
+  },
+  {
+    value: 3, label: 'Medium',
+    impact: 'Some (<50%) impacts significant, none business-threatening',
+    sla: { response: '8 hr', resolution: '48 hr', coverage: 'Standard hours' },
+  },
+  {
+    value: 4, label: 'Low',
+    impact: 'Most impacts negligible, no business-threatening impacts',
+    sla: { response: 'Best effort', resolution: 'Best effort', coverage: 'Standard hours' },
+  },
 ]
 
 const COMPLEXITY_OPTIONS = [
   { value: 'low',    label: 'Low' },
   { value: 'medium', label: 'Medium' },
   { value: 'high',   label: 'High' },
+]
+
+const WORKING_HOURS_PER_MONTH = 160  // 8h × 20 working days — fixed, not user-input
+
+const CONTRACT_DURATION_TILES = [
+  { years: 3, label: '3 Years',  discount: 0.00 },
+  { years: 5, label: '5 Years',  discount: 0.10 },
+  { years: 7, label: '7+ Years', discount: 0.15 },
+]
+// Note: 3 years is the baseline — no 4-year tile by design
+
+// Coverage tile metadata — title + time span by code
+const COVERAGE_META: Record<string, { title: string; span: string }> = {
+  '8x5':  { title: 'Business Hours',         span: '09:00–17:00, Mon–Fri' },
+  '12x5': { title: 'Extended Business Hours', span: '06:00–20:00, Mon–Fri' },
+  '24x7': { title: '24 × 7',                  span: 'including holidays'   },
+}
+
+const APPS_TILES = [
+  { code: '1-2',  label: '1–2 Apps',  discount: 0.00 },
+  { code: '3-5',  label: '3–5 Apps',  discount: 0.05 },
+  { code: '6-10', label: '6–10 Apps', discount: 0.10 },
+  { code: '10+',  label: '10+ Apps',  discount: 0.15 },
 ]
 
 const STAFFING_ROWS = [
@@ -145,23 +192,49 @@ function fmtAmt(n: number, symbol: string, code: string) {
 
 export default function QuoteWizard({
   serviceTypes, categoriesWithServices, deliveryLocations,
-  supportLevels, coverageOptions,
+  supportLevels, coverageOptions, slaSizes,
   currencies, exchangeRates,
-  userId, userEmail, userName, initialData,
+  initialData,
 }: Props) {
   const router = useRouter()
   const [step, setStep] = useState(0)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const didAutoSelect = useRef(false)
+  const prevStepRef = useRef(step)
 
   // Collapsible state for each service type slug in step 2
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
 
+  // Auto-preset Step 4 Complexity (sla_size_id) from Step 3 system_complexity when entering Step 4
+  useEffect(() => {
+    if (step === 3 && prevStepRef.current !== 3 && form.system_complexity) {
+      const complexityToSlaCode: Record<string, string> = {
+        low:    'small',
+        medium: 'medium',
+        high:   'large',
+      }
+      const targetCode = complexityToSlaCode[form.system_complexity]
+      const targetSla  = slaSizes.find(s => s.code === targetCode)
+      if (targetSla) {
+        up({ sla_size_id: targetSla.id })
+      }
+    }
+    prevStepRef.current = step
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step])
+
   // Derive default IDs from props (avoids hardcoding DB IDs)
-  const defaultLocationId = deliveryLocations.find(l => l.name.includes('GDC'))?.id ?? ''
+  // Default delivery location: Delivery Centres (GDC) → lowest rate → first after asc sort
+  const defaultLocationId = deliveryLocations.find(l => l.name.includes('GDC'))?.id
+    ?? deliveryLocations[0]?.id ?? ''
   const defaultSupportId  = supportLevels.find(s => s.code === 'l3')?.id ?? ''
   const defaultCoverageId = coverageOptions.find(c => c.code === '8x5')?.id ?? ''
+  const defaultSlaId = slaSizes.find(s => s.code === 'medium')?.id ?? ''
+
+  const initLocationId = initialData?.delivery_location_id ?? defaultLocationId
+  const initHourlyRate = deliveryLocations.find(l => l.id === initLocationId)?.hourly_rate_chf
+    ?? deliveryLocations[0]?.hourly_rate_chf ?? 0
 
   const [form, setForm] = useState<FormData>({
     reference_code:            '',
@@ -175,15 +248,22 @@ export default function QuoteWizard({
     service_manager_fte:       initialData?.service_manager_fte       ?? '',
     app_engineer_fte:          initialData?.app_engineer_fte          ?? '',
     sre_devops_fte:            initialData?.sre_devops_fte            ?? '',
-    working_hours_per_month:   initialData?.working_hours_per_month   ?? 168,
-    delivery_location_id:      initialData?.delivery_location_id      ?? defaultLocationId,
+    base_fte_per_month:        initialData?.base_fte_per_month        ?? '',
+    working_hours_per_month:   WORKING_HOURS_PER_MONTH,
+    delivery_location_id:      initLocationId,
     support_level_id:          initialData?.support_level_id          ?? defaultSupportId,
     coverage_option_id:        initialData?.coverage_option_id        ?? defaultCoverageId,
+    sla_size_id:               initialData?.sla_size_id               ?? defaultSlaId,
+    hourly_rate_chf:           initialData?.hourly_rate_chf           ?? initHourlyRate,
     margin_pct:                initialData?.margin_pct                ?? 30,
     discount_pct:              initialData?.discount_pct              ?? 0,
     output_currency_code:      initialData?.output_currency_code      ?? 'CHF',
     contract_duration_years:   initialData?.contract_duration_years   ?? 3,
+    number_of_apps_code:       initialData?.number_of_apps_code       ?? '1-2',
   })
+
+  // Track whether the user has manually overridden base_fte_per_month
+  const [baseFteManuallySet, setBaseFteManuallySet] = useState(!!initialData?.base_fte_per_month)
 
   const up = (patch: Partial<FormData>) => setForm(prev => ({ ...prev, ...patch }))
 
@@ -226,6 +306,13 @@ export default function QuoteWizard({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step])
 
+  // Sync hourly rate when delivery location changes (pre-fill, user can still override)
+  useEffect(() => {
+    const loc = deliveryLocations.find(l => l.id === form.delivery_location_id)
+    if (loc) up({ hourly_rate_chf: loc.hourly_rate_chf })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.delivery_location_id])
+
   // ── Derived ──────────────────────────────────────────────────────────────
 
   const selectedSlugs = useMemo(() =>
@@ -236,6 +323,7 @@ export default function QuoteWizard({
   const selLocation = deliveryLocations.find(l => l.id === form.delivery_location_id)
   const selSupport  = supportLevels.find(s => s.id === form.support_level_id)
   const selCoverage = coverageOptions.find(c => c.id === form.coverage_option_id)
+  const selSla      = slaSizes.find(s => s.id === form.sla_size_id)
   const selCurrency = currencies.find(c => c.code === form.output_currency_code)
     ?? { symbol: form.output_currency_code, code: form.output_currency_code }
 
@@ -246,24 +334,56 @@ export default function QuoteWizard({
     [form.service_manager_fte, form.app_engineer_fte, form.sre_devops_fte]
   )
 
+  // Auto-sync base_fte_per_month from staffing total unless user has manually overridden
+  useEffect(() => {
+    if (!baseFteManuallySet) {
+      up({ base_fte_per_month: totalFte > 0 ? totalFte.toFixed(1) : '' })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalFte, baseFteManuallySet])
+
   const exRate = exchangeRates[form.output_currency_code] ?? 1
 
-  const baseChf = useMemo(() =>
-    totalFte * (selLocation?.hourly_rate_chf ?? 0) * form.working_hours_per_month,
-    [totalFte, selLocation, form.working_hours_per_month]
+  // billing FTE: base_fte_per_month if set, otherwise falls back to staffing sum
+  const billingFte = parseFloat(form.base_fte_per_month) || totalFte
+
+  // ── Formula (annual-first, then /12 for monthly) ───────────────────────
+  // Uses billingFte (Base FTEs / Month) and the manual hourly_rate_chf field
+  const baseAnnualChf = useMemo(() =>
+    billingFte * form.hourly_rate_chf * WORKING_HOURS_PER_MONTH * 12,
+    [billingFte, form.hourly_rate_chf]
   )
 
-  const internalCostChf = useMemo(() =>
-    baseChf
+  const subtotalAnnualChf = useMemo(() =>
+    baseAnnualChf
     * (1 + (selSupport?.uplift_decimal  ?? 0))
-    * (1 + (selCoverage?.uplift_decimal ?? 0)),
-    [baseChf, selSupport, selCoverage]
+    * (1 + (selCoverage?.uplift_decimal ?? 0))
+    * (1 + (selSla?.uplift_decimal      ?? 0)),
+    [baseAnnualChf, selSupport, selCoverage, selSla]
   )
 
-  const clientPriceChf = useMemo(() =>
-    internalCostChf * (1 + form.margin_pct / 100) * (1 - form.discount_pct / 100),
-    [internalCostChf, form.margin_pct, form.discount_pct]
+  // Automatic volume discounts driven by tile selection
+  const durationDiscount = useMemo(() =>
+    CONTRACT_DURATION_TILES.find(t => t.years === form.contract_duration_years)?.discount ?? 0,
+    [form.contract_duration_years]
   )
+  const appsDiscount = useMemo(() =>
+    APPS_TILES.find(t => t.code === form.number_of_apps_code)?.discount ?? 0,
+    [form.number_of_apps_code]
+  )
+
+  // discount_pct is a manual field (user-entered %); duration + apps discounts stack on top
+  const afterDiscountAnnualChf = useMemo(() =>
+    subtotalAnnualChf * (1 - form.discount_pct / 100) * (1 - durationDiscount) * (1 - appsDiscount),
+    [subtotalAnnualChf, form.discount_pct, durationDiscount, appsDiscount]
+  )
+
+  const finalAnnualChf  = useMemo(() =>
+    afterDiscountAnnualChf * (1 + form.margin_pct / 100),
+    [afterDiscountAnnualChf, form.margin_pct]
+  )
+
+  const finalMonthlyChf = useMemo(() => finalAnnualChf / 12, [finalAnnualChf])
 
   const fmt    = (chfVal: number) => fmtAmt(chfVal * exRate, selCurrency.symbol, selCurrency.code)
   const fmtChf = (n: number) =>
@@ -279,7 +399,8 @@ export default function QuoteWizard({
       totalFte > 0 &&
       form.delivery_location_id !== '' &&
       form.support_level_id !== '' &&
-      form.coverage_option_id !== ''
+      form.coverage_option_id !== '' &&
+      form.sla_size_id !== ''
     )
     return true
   }
@@ -289,63 +410,46 @@ export default function QuoteWizard({
   async function handleSave(status: 'draft' | 'finalized') {
     setSaving(true)
     setError('')
-    const supabase = createClient()
-    const now = new Date().toISOString()
-    const clientPriceOut = clientPriceChf * exRate
-
-    const { data: quote, error: qErr } = await supabase
-      .from('quotes')
-      .insert({
-        user_id:                     userId,
-        creator_email:               userEmail,
-        creator_name:                userName || userEmail,
-        reference_code:              form.reference_code,
-        client_name:                 form.client_name || null,
-        service_type_id:             form.selected_service_type_ids[0] ?? null,
-        service_type_ids:            form.selected_service_type_ids,
-        developed_by_zuhlke:         form.developed_by_zuhlke,
-        service_manager_fte:         parseFloat(form.service_manager_fte) || 0,
-        app_engineer_fte:            parseFloat(form.app_engineer_fte)   || 0,
-        sre_devops_fte:              parseFloat(form.sre_devops_fte)     || 0,
-        fte_estimate:                totalFte,
-        working_hours_per_month:     form.working_hours_per_month,
-        delivery_location_id:        form.delivery_location_id || null,
-        business_criticality:        form.business_criticality,
-        system_complexity:           form.system_complexity || null,
-        support_level_id:            form.support_level_id || null,
-        coverage_option_id:          form.coverage_option_id || null,
-        sla_size_id:                 null,
-        margin_pct:                  form.margin_pct,
-        discount_pct:                form.discount_pct,
-        output_currency_code:        form.output_currency_code,
-        exchange_rate_snapshot:      exchangeRates,
-        base_price_chf:              baseChf,
-        internal_cost_chf:           internalCostChf,
-        client_price_chf:            clientPriceChf,
-        final_price_chf:             clientPriceChf,
-        final_price_output_currency: clientPriceOut,
-        notes:                       form.notes || null,
-        contract_duration_years:     form.contract_duration_years,
+    try {
+      await saveQuote(
+        {
+          reference_code:             form.reference_code,
+          client_name:                form.client_name,
+          developed_by_zuhlke:        form.developed_by_zuhlke,
+          selected_service_type_ids:  form.selected_service_type_ids,
+          notes:                      form.notes,
+          selected_service_ids:       form.selected_service_ids,
+          business_criticality:       form.business_criticality,
+          system_complexity:          form.system_complexity,
+          service_manager_fte:        form.service_manager_fte,
+          app_engineer_fte:           form.app_engineer_fte,
+          sre_devops_fte:             form.sre_devops_fte,
+          base_fte_per_month:         String(billingFte),
+          working_hours_per_month:    WORKING_HOURS_PER_MONTH,
+          delivery_location_id:       form.delivery_location_id,
+          support_level_id:           form.support_level_id,
+          coverage_option_id:         form.coverage_option_id,
+          sla_size_id:                form.sla_size_id,
+          margin_pct:                 form.margin_pct,
+          discount_pct:               form.discount_pct,
+          output_currency_code:       form.output_currency_code,
+          exchange_rate_snapshot:     exchangeRates,
+          base_price_chf:             billingFte * form.hourly_rate_chf * WORKING_HOURS_PER_MONTH,
+          internal_cost_chf:          afterDiscountAnnualChf / 12,
+          client_price_chf:           finalMonthlyChf,
+          final_price_chf:            finalMonthlyChf,
+          final_price_output_currency: finalMonthlyChf * exRate,
+          contract_duration_years:    form.contract_duration_years,
+        },
         status,
-        finalized_at:                status === 'finalized' ? now : null,
-      })
-      .select()
-      .single()
-
-    if (qErr || !quote) {
-      setError('Failed to save quote. Please try again.')
-      setSaving(false)
-      return
-    }
-
-    if (form.selected_service_ids.length > 0) {
-      await supabase.from('quote_services').insert(
-        form.selected_service_ids.map(sid => ({ quote_id: quote.id, service_id: sid }))
       )
+      router.push('/')
+    } catch (err) {
+      console.error('[handleSave] error:', err)
+      setError('Failed to save quote. Please try again.')
+    } finally {
+      setSaving(false)
     }
-
-    router.push('/')
-    router.refresh()
   }
 
   // ── UI helpers ────────────────────────────────────────────────────────────
@@ -712,11 +816,25 @@ export default function QuoteWizard({
                       name="criticality"
                       checked={form.business_criticality === opt.value}
                       onChange={() => up({ business_criticality: opt.value })}
-                      className="mt-0.5 accent-blue-500"
+                      className="mt-1 accent-blue-500 shrink-0"
                     />
-                    <div>
-                      <div className="text-sm font-medium text-gray-200">{opt.label}</div>
-                      <div className="text-xs text-gray-500">{opt.description}</div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-gray-200 mb-0.5">{opt.label}</div>
+                      <div className="text-xs text-gray-400 mb-2">{opt.impact}</div>
+                      <div className="flex flex-wrap gap-2">
+                        <span className="inline-flex items-center gap-1 text-[11px] bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-gray-300">
+                          <span className="text-gray-500">P1 response</span>
+                          <span className="font-medium text-gray-100">{opt.sla.response}</span>
+                        </span>
+                        <span className="inline-flex items-center gap-1 text-[11px] bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-gray-300">
+                          <span className="text-gray-500">resolution</span>
+                          <span className="font-medium text-gray-100">{opt.sla.resolution}</span>
+                        </span>
+                        <span className="inline-flex items-center gap-1 text-[11px] bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-gray-300">
+                          <span className="text-gray-500">coverage</span>
+                          <span className="font-medium text-gray-100">{opt.sla.coverage}</span>
+                        </span>
+                      </div>
                     </div>
                   </label>
                 ))}
@@ -768,28 +886,139 @@ export default function QuoteWizard({
           <div className="space-y-6">
             <p className="text-sm text-gray-400 -mt-1">{STEP_INTRO[3]}</p>
 
-            {/* Currency */}
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Output currency</label>
-              <select
-                value={form.output_currency_code}
-                onChange={e => up({ output_currency_code: e.target.value })}
-                className="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                {currencies.map(c => (
-                  <option key={c.code} value={c.code}>{c.symbol} {c.name} ({c.code})</option>
-                ))}
-              </select>
-              {form.output_currency_code !== 'CHF' && (
-                <p className="text-xs text-gray-500 mt-1">
-                  All prices shown in {form.output_currency_code} · rate: 1 CHF = {exRate.toFixed(4)} {form.output_currency_code}
-                </p>
-              )}
-            </div>
-
-            {/* Staffing */}
+            {/* ── 1. Complexity Tiles ── */}
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">
+                Complexity <span className="text-red-400 ml-1">*</span>
+                {form.system_complexity && (
+                  <span className="ml-2 text-xs font-normal text-gray-500">← preset from Step 3 — System Complexity</span>
+                )}
+              </label>
+              <div className="flex gap-3">
+                {slaSizes.map(ss => (
+                  <label key={ss.id} className={tileClass(form.sla_size_id === ss.id)}>
+                    <input type="radio" name="sla" checked={form.sla_size_id === ss.id}
+                      onChange={() => up({ sla_size_id: ss.id })} className="sr-only" />
+                    <div className="text-sm font-medium text-gray-200">{ss.name}</div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      {ss.uplift_decimal > 0
+                        ? `+${(ss.uplift_decimal * 100).toFixed(0)}%`
+                        : ss.uplift_decimal < 0
+                          ? `${(ss.uplift_decimal * 100).toFixed(0)}%`
+                          : 'Baseline'}
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* ── 1b. Criticality — preset from Step 3 (read-only) ── */}
+            {form.business_criticality !== null && (() => {
+              const crit = CRITICALITY_OPTIONS.find(o => o.value === form.business_criticality)
+              return crit ? (
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">
+                    Criticality
+                    <span className="ml-2 text-xs font-normal text-gray-500">← from Step 3 — Business Assessment</span>
+                  </label>
+                  <div className="flex items-start gap-3 p-3 rounded-lg border border-gray-600 bg-gray-700/40">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold text-gray-100">{crit.label}</p>
+                      <p className="text-xs text-gray-400 mt-0.5 leading-snug">{crit.impact}</p>
+                    </div>
+                    <div className="text-right text-xs text-gray-400 whitespace-nowrap space-y-0.5">
+                      <p>Response: <span className="text-gray-200">{crit.sla.response}</span></p>
+                      <p>Resolution: <span className="text-gray-200">{crit.sla.resolution}</span></p>
+                      <p>Coverage: <span className="text-gray-200">{crit.sla.coverage}</span></p>
+                    </div>
+                  </div>
+                </div>
+              ) : null
+            })()}
+
+            {/* ── 2. Support Level Tiles ── */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                Support Level <span className="text-red-400 ml-1">*</span>
+              </label>
+              <div className="flex gap-3">
+                {supportLevels.map(sl => (
+                  <label key={sl.id} className={tileClass(form.support_level_id === sl.id)}>
+                    <input type="radio" name="support" checked={form.support_level_id === sl.id}
+                      onChange={() => up({ support_level_id: sl.id })} className="sr-only" />
+                    <div className="text-sm font-medium text-gray-200">{sl.name}</div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      {sl.uplift_decimal > 0 ? `+${(sl.uplift_decimal * 100).toFixed(0)}%` : 'Baseline'}
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* ── 3. Coverage Tiles ── */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                Coverage <span className="text-red-400 ml-1">*</span>
+              </label>
+              <div className="flex gap-3">
+                {coverageOptions.map(co => {
+                  const meta = COVERAGE_META[co.code]
+                  return (
+                    <label key={co.id} className={tileClass(form.coverage_option_id === co.id)}>
+                      <input type="radio" name="coverage" checked={form.coverage_option_id === co.id}
+                        onChange={() => up({ coverage_option_id: co.id })} className="sr-only" />
+                      <div className="text-sm font-semibold text-gray-100 w-full pb-1.5 mb-1.5 border-b border-gray-600/50 leading-snug">
+                        {meta?.title ?? co.name}
+                      </div>
+                      <div className="text-xs text-gray-400 leading-snug min-h-[2.5em]">
+                        {meta?.span ?? ''}
+                      </div>
+                      <div className="text-xs text-blue-400 mt-2 font-medium">
+                        {co.uplift_decimal > 0 ? `+${(co.uplift_decimal * 100).toFixed(0)}%` : 'Baseline'}
+                      </div>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+
+            {/* ── 4. Contract Duration Tiles ── */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">Contract duration</label>
+              <div className="flex gap-3">
+                {CONTRACT_DURATION_TILES.map(tile => (
+                  <label key={tile.years} className={tileClass(form.contract_duration_years === tile.years)}>
+                    <input type="radio" name="duration" checked={form.contract_duration_years === tile.years}
+                      onChange={() => up({ contract_duration_years: tile.years })} className="sr-only" />
+                    <div className="text-sm font-medium text-gray-200">{tile.label}</div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      {tile.discount > 0 ? `−${(tile.discount * 100).toFixed(0)}%` : 'Baseline'}
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* ── 5. Number of Applications Tiles ── */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">Number of applications</label>
+              <div className="flex gap-3">
+                {APPS_TILES.map(tile => (
+                  <label key={tile.code} className={tileClass(form.number_of_apps_code === tile.code)}>
+                    <input type="radio" name="apps" checked={form.number_of_apps_code === tile.code}
+                      onChange={() => up({ number_of_apps_code: tile.code })} className="sr-only" />
+                    <div className="text-sm font-medium text-gray-200">{tile.label}</div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      {tile.discount > 0 ? `−${(tile.discount * 100).toFixed(0)}%` : 'Baseline'}
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* ── 6. Service delivery staffing ── */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-200 mb-1">
                 Service delivery staffing <span className="text-red-400">*</span>
               </label>
               <div className="border border-gray-700 rounded-lg overflow-hidden">
@@ -802,7 +1031,7 @@ export default function QuoteWizard({
                   </thead>
                   <tbody>
                     {STAFFING_ROWS.map((row, i) => (
-                      <tr key={row.key} className={`border-b border-gray-700 ${i % 2 === 0 ? 'bg-gray-800' : 'bg-gray-750 bg-gray-700/30'}`}>
+                      <tr key={row.key} className={`border-b border-gray-700 ${i % 2 === 0 ? 'bg-gray-800' : 'bg-gray-700/30'}`}>
                         <td className="px-4 py-2.5 text-xs font-medium text-gray-300">{row.label}</td>
                         <td className="px-3 py-2">
                           <input
@@ -817,10 +1046,10 @@ export default function QuoteWizard({
                         </td>
                       </tr>
                     ))}
-                    <tr className="bg-blue-900/30 border-t-2 border-blue-700/50">
-                      <td className="px-4 py-2.5 text-xs font-semibold text-blue-300">Total FTE</td>
-                      <td className="px-3 py-2.5 text-center text-sm font-bold text-blue-200">
-                        {totalFte.toFixed(1)}
+                    <tr className="bg-gray-700/40 border-t border-gray-600">
+                      <td className="px-4 py-2 text-xs font-medium text-gray-400">Total FTE (staffing sum)</td>
+                      <td className="px-3 py-2 text-center text-sm font-semibold text-gray-300">
+                        {totalFte.toFixed(2)}
                       </td>
                     </tr>
                   </tbody>
@@ -828,180 +1057,195 @@ export default function QuoteWizard({
               </div>
             </div>
 
-            {/* Hours per month — read-only */}
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Hours per month</label>
-              <div className="flex items-center gap-3">
-                <span className="text-sm font-medium text-gray-100">{form.working_hours_per_month} hrs</span>
-                <span className="text-xs text-gray-500">Standard: 168 hrs/month (21 days × 8 hrs)</span>
-              </div>
-            </div>
-
-            {/* Delivery location */}
-            <div>
-              <label className="flex items-center text-sm font-medium text-gray-300 mb-2">
-                Delivery location <span className="text-red-400 ml-1">*</span>
-                <InfoTooltip content={
-                  <div className="space-y-2">
-                    <p className="font-semibold text-gray-100">Delivery Location</p>
-                    <p>Where the support team is based. The hourly rate is the primary cost multiplier — location choice has the biggest impact on overall price.</p>
-                    <ul className="space-y-1.5 mt-1">
-                      <li><span className="text-blue-300 font-medium">GDC (Global Delivery Center):</span> Nearshore/offshore. Lower rate. Check language requirements — German-speaking support for DACH clients may restrict GDC use.</li>
-                      <li><span className="text-blue-300 font-medium">Onshore (CH/DE):</span> Higher rate. No language restrictions. Closer to client timezone.</li>
-                    </ul>
-                    <p className="text-gray-400 pt-1 border-t border-gray-700">For DACH engagements, always confirm language requirements with the client before selecting GDC.</p>
-                  </div>
-                } />
-              </label>
-              <div className="space-y-2">
-                {deliveryLocations.map(loc => {
-                  const locRateOut = loc.hourly_rate_chf * exRate
-                  return (
-                    <label
-                      key={loc.id}
-                      className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer transition-colors ${
-                        form.delivery_location_id === loc.id
-                          ? 'border-blue-500 bg-blue-900/20'
-                          : 'border-gray-700 hover:border-gray-600'
-                      }`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <input
-                          type="radio"
-                          name="location"
-                          checked={form.delivery_location_id === loc.id}
-                          onChange={() => up({ delivery_location_id: loc.id })}
-                          className="accent-blue-500"
-                        />
-                        <span className="text-sm font-medium text-gray-200">{loc.name}</span>
-                      </div>
-                      <span className="text-sm text-gray-500">
-                        {form.output_currency_code === 'CHF'
-                          ? `CHF ${loc.hourly_rate_chf}/hr`
-                          : `${selCurrency.symbol} ${locRateOut.toFixed(0)}/hr`}
-                      </span>
-                    </label>
-                  )
-                })}
-              </div>
-            </div>
-
-            {/* Support level */}
-            <div>
-              <label className="flex items-center text-sm font-medium text-gray-300 mb-2">
-                Support level <span className="text-red-400 ml-1">*</span>
-                <InfoTooltip content={
-                  <div className="space-y-2">
-                    <p className="font-semibold text-gray-100">Support Level</p>
-                    <p>Defines the layers of support Zühlke provides in this engagement.</p>
-                    <ul className="space-y-1.5 mt-1">
-                      <li><span className="text-blue-300 font-medium">L3 only:</span> Technical and engineering support. The client (or a subcontractor) handles L1/L2 end-user queries. Most common setup.</li>
-                      <li><span className="text-blue-300 font-medium">L1+L2+L3:</span> Full support stack including end-user queries. Significantly expands team scope and cost. May restrict GDC use if German is required for DACH clients.</li>
-                    </ul>
-                  </div>
-                } />
-              </label>
-              <div className="flex gap-3">
-                {supportLevels.map(sl => (
-                  <label key={sl.id} className={tileClass(form.support_level_id === sl.id)}>
-                    <input type="radio" name="support" checked={form.support_level_id === sl.id}
-                      onChange={() => up({ support_level_id: sl.id })} className="sr-only" />
-                    <div className="text-sm font-medium text-gray-200">{sl.name}</div>
-                    <div className="text-xs text-gray-500 mt-0.5">
-                      {sl.uplift_decimal > 0 ? `+${(sl.uplift_decimal * 100).toFixed(0)}%` : 'Base'}
-                    </div>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            {/* Coverage */}
-            <div>
-              <label className="flex items-center text-sm font-medium text-gray-300 mb-2">
-                Coverage <span className="text-red-400 ml-1">*</span>
-                <InfoTooltip width="w-80" content={
-                  <div className="space-y-2">
-                    <p className="font-semibold text-white">Coverage window</p>
-                    <p>Controls how many hours per day the team is staffed and on-call. A wider window multiplies the base cost.</p>
-                    <div className="mt-2 space-y-1.5">
-                      <p><span className="text-blue-300 font-medium">Standard (8×5)</span> — 09:00–17:00, Mon–Fri. Suitable for Low / Medium criticality. No uplift.</p>
-                      <p><span className="text-blue-300 font-medium">Extended (8×7)</span> — 06:00–20:00 including weekends. Required for High criticality or customer-facing services with weekend traffic.</p>
-                      <p><span className="text-blue-300 font-medium">24×7</span> — Full around-the-clock coverage. Mandatory for Critical (BC1) systems. Adds a significant cost multiplier.</p>
-                    </div>
-                    <p className="text-gray-400 text-[11px] mt-1">Coverage tier must align with the Business Criticality SLA target selected in Step 3.</p>
-                  </div>
-                } />
-              </label>
-              <div className="flex gap-3">
-                {coverageOptions.map(co => (
-                  <label key={co.id} className={tileClass(form.coverage_option_id === co.id)}>
-                    <input type="radio" name="coverage" checked={form.coverage_option_id === co.id}
-                      onChange={() => up({ coverage_option_id: co.id })} className="sr-only" />
-                    <div className="text-sm font-medium text-gray-200">{co.name}</div>
-                    <div className="text-xs text-gray-500 mt-0.5">
-                      {co.uplift_decimal > 0 ? `+${(co.uplift_decimal * 100).toFixed(0)}%` : 'Base'}
-                    </div>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            {/* Margin & Discount */}
-            <div className="grid grid-cols-2 gap-5">
+            {/* ── 7. Delivery Location + Output Currency ── */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">
-                  Margin <span className="text-xs font-normal text-gray-500">(% markup on cost)</span>
+                <label className="flex items-center text-sm font-medium text-gray-300 mb-1">
+                  Delivery location <span className="text-red-400 ml-1">*</span>
                 </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min="0"
-                    max="300"
-                    step="1"
-                    value={form.margin_pct}
-                    onChange={e => up({ margin_pct: Math.max(0, Math.min(300, parseInt(e.target.value) || 0)) })}
-                    className="w-24 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-500">%</span>
-                </div>
-                <p className="text-xs text-gray-500 mt-1">Default 30% · range 0–300</p>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">
-                  Cumulative discount
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min="0"
-                    max="100"
-                    step="1"
-                    value={form.discount_pct}
-                    onChange={e => up({ discount_pct: Math.max(0, Math.min(100, parseInt(e.target.value) || 0)) })}
-                    className="w-24 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-500">%</span>
-                </div>
-                <p className="text-xs text-gray-500 mt-1">Default 0% · applied after margin</p>
-              </div>
-            </div>
-
-            {/* Contract duration */}
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">
-                Contract duration
-              </label>
-              <div className="flex items-center gap-3">
                 <select
-                  value={form.contract_duration_years}
-                  onChange={e => up({ contract_duration_years: parseInt(e.target.value) })}
-                  className="w-32 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={form.delivery_location_id}
+                  onChange={e => up({ delivery_location_id: e.target.value })}
+                  className="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  {CONTRACT_DURATION_OPTIONS.map(y => (
-                    <option key={y} value={y}>{y} {y === 1 ? 'year' : 'years'}</option>
+                  <option value="">Select location...</option>
+                  {deliveryLocations.map(loc => {
+                    const rateOut = (loc.hourly_rate_chf * exRate).toFixed(0)
+                    const rateLabel = form.output_currency_code === 'CHF'
+                      ? `CHF ${loc.hourly_rate_chf}/hr`
+                      : `${selCurrency.symbol} ${rateOut}/hr`
+                    return (
+                      <option key={loc.id} value={loc.id}>{loc.name} — {rateLabel}</option>
+                    )
+                  })}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Output currency</label>
+                <select
+                  value={form.output_currency_code}
+                  onChange={e => up({ output_currency_code: e.target.value })}
+                  className="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {currencies.map(c => (
+                    <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>
                   ))}
                 </select>
-                <p className="text-xs text-gray-500">Indicative — longer contracts may qualify for volume discounts.</p>
+                {form.output_currency_code !== 'CHF' && (
+                  <p className="text-xs text-blue-400/80 mt-1">
+                    Today's rate: 1 CHF = {exRate.toFixed(4)} {form.output_currency_code}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* ── 8. Exchange Rate Table ── */}
+            <div>
+              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Exchange rates (today, reference: CHF)</p>
+              <div className="border border-gray-700 rounded-lg overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-gray-700/50 border-b border-gray-700">
+                      <th className="text-left px-3 py-2 font-medium text-gray-400">Currency</th>
+                      <th className="text-left px-3 py-2 font-medium text-gray-400">Code</th>
+                      <th className="text-right px-3 py-2 font-medium text-gray-400">1 CHF =</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {currencies.map((c, i) => {
+                      const rate = exchangeRates[c.code] ?? null
+                      return (
+                        <tr key={c.code} className={`border-b border-gray-700/50 ${i % 2 === 0 ? 'bg-gray-800' : 'bg-gray-700/20'} ${form.output_currency_code === c.code ? 'ring-inset ring-1 ring-blue-600/40' : ''}`}>
+                          <td className="px-3 py-1.5 text-gray-300">{c.name}</td>
+                          <td className="px-3 py-1.5 font-mono text-gray-400">{c.symbol} {c.code}</td>
+                          <td className="px-3 py-1.5 text-right font-mono text-gray-200">
+                            {rate !== null ? rate.toFixed(4) : '—'}
+                            {form.output_currency_code === c.code && c.code !== 'CHF' && (
+                              <span className="ml-1.5 text-blue-400">← active</span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* ── 9. Commercials: Hourly rate + Margin + Discount ── */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">
+                  Hourly rate {form.output_currency_code}
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={(form.hourly_rate_chf * exRate).toFixed(2)}
+                    onChange={e => {
+                      const valInOutputCcy = parseFloat(e.target.value) || 0
+                      up({ hourly_rate_chf: valInOutputCcy / exRate })
+                    }}
+                    className="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <span className="text-sm text-gray-500 shrink-0">/hr</span>
+                </div>
+                {form.output_currency_code !== 'CHF' && (
+                  <p className="text-xs text-gray-500 mt-1">= CHF {form.hourly_rate_chf.toFixed(2)}/hr</p>
+                )}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Margin %</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="300"
+                  step="1"
+                  value={form.margin_pct}
+                  onChange={e => up({ margin_pct: Math.max(0, Math.min(300, parseInt(e.target.value) || 0)) })}
+                  className="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Cumulative discount %</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  placeholder="0"
+                  value={form.discount_pct}
+                  onChange={e => up({ discount_pct: Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)) })}
+                  className="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            {/* ── Pricing Breakdown Panel ── */}
+            <div className="bg-gray-700/30 border border-gray-700 rounded-lg p-5">
+              <p className="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-4">Pricing breakdown</p>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between text-gray-400">
+                  <span>Base annual ({billingFte.toFixed(2)} FTE × {form.output_currency_code === 'CHF' ? `CHF ${form.hourly_rate_chf.toFixed(0)}` : `${selCurrency.symbol} ${(form.hourly_rate_chf * exRate).toFixed(0)}`}/hr × 160h × 12)</span>
+                  <span>{fmt(baseAnnualChf)}</span>
+                </div>
+                <div className="flex justify-between text-gray-500 text-xs">
+                  <span>Support level</span>
+                  <span>{selSupport && selSupport.uplift_decimal !== 0 ? `+${(selSupport.uplift_decimal * 100).toFixed(0)}%` : '—'}</span>
+                </div>
+                <div className="flex justify-between text-gray-500 text-xs">
+                  <span>Coverage</span>
+                  <span>{selCoverage && selCoverage.uplift_decimal !== 0 ? `+${(selCoverage.uplift_decimal * 100).toFixed(0)}%` : '—'}</span>
+                </div>
+                <div className="flex justify-between text-gray-500 text-xs">
+                  <span>Complexity</span>
+                  <span>{selSla && selSla.uplift_decimal !== 0 ? `${selSla.uplift_decimal > 0 ? '+' : ''}${(selSla.uplift_decimal * 100).toFixed(0)}%` : '—'}</span>
+                </div>
+                <div className="flex justify-between text-gray-300 font-medium pt-1 border-t border-gray-700">
+                  <span>Subtotal</span>
+                  <span>{fmt(subtotalAnnualChf)}</span>
+                </div>
+                <div className="flex justify-between text-gray-500 text-xs">
+                  <span>Manual discount</span>
+                  <span>{form.discount_pct > 0 ? `−${form.discount_pct.toFixed(0)}%` : '—'}</span>
+                </div>
+                {durationDiscount > 0 && (
+                  <div className="flex justify-between text-orange-400 text-xs">
+                    <span>Duration discount ({form.contract_duration_years}y: −{(durationDiscount * 100).toFixed(0)}%)</span>
+                    <span>−{fmt(subtotalAnnualChf * (1 - form.discount_pct / 100) * durationDiscount)}</span>
+                  </div>
+                )}
+                {appsDiscount > 0 && (
+                  <div className="flex justify-between text-orange-400 text-xs">
+                    <span>Portfolio discount (−{(appsDiscount * 100).toFixed(0)}%)</span>
+                    <span>−{fmt(subtotalAnnualChf * (1 - form.discount_pct / 100) * (1 - durationDiscount) * appsDiscount)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-gray-300 font-medium">
+                  <span>Cost before margin</span>
+                  <span>{fmt(afterDiscountAnnualChf)}</span>
+                </div>
+                <div className="flex justify-between text-gray-500 text-xs">
+                  <span>Margin</span>
+                  <span>+{form.margin_pct}%</span>
+                </div>
+                <div className="border-t border-gray-600 pt-3 mt-1 space-y-1.5">
+                  <div className="flex justify-between text-xl font-bold text-blue-300">
+                    <span>{fmt(finalAnnualChf)}</span>
+                    <span className="text-sm font-normal text-gray-400 self-end">per year</span>
+                  </div>
+                  <div className="flex justify-between text-base font-semibold text-gray-100">
+                    <span>{fmt(finalMonthlyChf)}</span>
+                    <span className="text-xs font-normal text-gray-400 self-end">per month</span>
+                  </div>
+                  {form.output_currency_code !== 'CHF' && (
+                    <div className="text-xs text-gray-500 pt-1">
+                      {fmtChf(finalAnnualChf / exRate)} / yr · {fmtChf(finalMonthlyChf / exRate)} / mo (CHF)
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -1030,8 +1274,32 @@ export default function QuoteWizard({
                 </p>
               </div>
               <div>
-                <p className="text-gray-500">Services selected</p>
-                <p className="font-medium text-gray-100">{form.selected_service_ids.length}</p>
+                <p className="text-gray-500 mb-1.5">Services selected</p>
+                <div className="space-y-2">
+                  {serviceTypes
+                    .filter(st => form.selected_service_type_ids.includes(st.id))
+                    .map(st => {
+                      const selected = categoriesWithServices
+                        .filter(c => c.service_types?.slug === st.slug)
+                        .flatMap(c => c.services)
+                        .filter(s => form.selected_service_ids.includes(s.id))
+                      if (selected.length === 0) return null
+                      return (
+                        <div key={st.id}>
+                          <p className="text-xs font-semibold text-blue-400 uppercase tracking-wide mb-1">{st.name}</p>
+                          <ul className="space-y-0.5">
+                            {selected.map(s => (
+                              <li key={s.id} className="text-xs font-medium text-gray-200">{s.name}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )
+                    })
+                  }
+                  {form.selected_service_ids.length === 0 && (
+                    <p className="text-xs text-gray-500">—</p>
+                  )}
+                </div>
               </div>
               <div>
                 <p className="text-gray-500">Business criticality</p>
@@ -1092,56 +1360,72 @@ export default function QuoteWizard({
               <p className="text-sm font-semibold text-gray-200 mb-3">Subscription fee breakdown</p>
               <div className="space-y-2 text-sm">
                 <div className="flex justify-between text-gray-400">
-                  <span>
-                    Base cost ({totalFte.toFixed(1)} FTE × {
-                      form.output_currency_code === 'CHF'
-                        ? `CHF ${selLocation?.hourly_rate_chf}`
-                        : `${selCurrency.symbol} ${((selLocation?.hourly_rate_chf ?? 0) * exRate).toFixed(0)}`
-                    }/hr × {form.working_hours_per_month} hrs)
-                  </span>
-                  <span>{fmt(baseChf)}</span>
+                  <span>Base annual (FTE × rate × 160h × 12)</span>
+                  <span>{fmt(baseAnnualChf / 12)}</span>
                 </div>
                 {selSupport && selSupport.uplift_decimal !== 0 && (
                   <div className="flex justify-between text-gray-400">
-                    <span>Support uplift ({selSupport.name}: +{(selSupport.uplift_decimal * 100).toFixed(0)}%)</span>
-                    <span>+{fmt(baseChf * selSupport.uplift_decimal)}</span>
+                    <span>Support uplift ({selSupport.name}: {selSupport.uplift_decimal > 0 ? '+' : ''}{(selSupport.uplift_decimal * 100).toFixed(0)}%)</span>
+                    <span>{selSupport.uplift_decimal > 0 ? '+' : ''}{fmt(baseAnnualChf / 12 * selSupport.uplift_decimal)}</span>
                   </div>
                 )}
                 {selCoverage && selCoverage.uplift_decimal !== 0 && (
                   <div className="flex justify-between text-gray-400">
-                    <span>Coverage uplift ({selCoverage.name}: +{(selCoverage.uplift_decimal * 100).toFixed(0)}%)</span>
-                    <span>+{fmt(baseChf * (1 + (selSupport?.uplift_decimal ?? 0)) * selCoverage.uplift_decimal)}</span>
+                    <span>Coverage uplift ({selCoverage.name}: {selCoverage.uplift_decimal > 0 ? '+' : ''}{(selCoverage.uplift_decimal * 100).toFixed(0)}%)</span>
+                    <span>{selCoverage.uplift_decimal > 0 ? '+' : ''}{fmt(baseAnnualChf / 12 * (1 + (selSupport?.uplift_decimal ?? 0)) * selCoverage.uplift_decimal)}</span>
+                  </div>
+                )}
+                {selSla && selSla.uplift_decimal !== 0 && (
+                  <div className="flex justify-between text-gray-400">
+                    <span>SLA uplift ({selSla.name}: {selSla.uplift_decimal > 0 ? '+' : ''}{(selSla.uplift_decimal * 100).toFixed(0)}%)</span>
+                    <span>{selSla.uplift_decimal > 0 ? '+' : ''}{fmt(baseAnnualChf / 12 * (1 + (selSupport?.uplift_decimal ?? 0)) * (1 + (selCoverage?.uplift_decimal ?? 0)) * selSla.uplift_decimal)}</span>
                   </div>
                 )}
                 <div className="flex justify-between text-gray-300 font-medium pt-1 border-t border-gray-700">
-                  <span>Internal cost / month</span>
-                  <span>{fmt(internalCostChf)}</span>
+                  <span>Subtotal (monthly)</span>
+                  <span>{fmt(subtotalAnnualChf / 12)}</span>
+                </div>
+                {form.discount_pct > 0 && (
+                  <div className="flex justify-between text-orange-400">
+                    <span>Manual discount (−{form.discount_pct.toFixed(1)}%)</span>
+                    <span>−{fmt(subtotalAnnualChf / 12 * (form.discount_pct / 100))}</span>
+                  </div>
+                )}
+                {durationDiscount > 0 && (
+                  <div className="flex justify-between text-orange-400">
+                    <span>Duration discount ({form.contract_duration_years}y: −{(durationDiscount * 100).toFixed(0)}%)</span>
+                    <span>−{fmt(subtotalAnnualChf * (1 - form.discount_pct / 100) / 12 * durationDiscount)}</span>
+                  </div>
+                )}
+                {appsDiscount > 0 && (
+                  <div className="flex justify-between text-orange-400">
+                    <span>Portfolio discount (−{(appsDiscount * 100).toFixed(0)}%)</span>
+                    <span>−{fmt(subtotalAnnualChf * (1 - form.discount_pct / 100) * (1 - durationDiscount) / 12 * appsDiscount)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-gray-300 font-medium pt-1">
+                  <span>Cost before margin</span>
+                  <span>{fmt(afterDiscountAnnualChf / 12)}</span>
                 </div>
                 {form.margin_pct > 0 && (
                   <div className="flex justify-between text-green-400">
-                    <span>Margin (+{form.margin_pct}% markup)</span>
-                    <span>+{fmt(internalCostChf * form.margin_pct / 100)}</span>
-                  </div>
-                )}
-                {form.discount_pct > 0 && (
-                  <div className="flex justify-between text-orange-400">
-                    <span>Cumulative discount (−{form.discount_pct}%)</span>
-                    <span>−{fmt(internalCostChf * (1 + form.margin_pct / 100) * form.discount_pct / 100)}</span>
+                    <span>Margin (+{form.margin_pct}%)</span>
+                    <span>+{fmt(afterDiscountAnnualChf / 12 * form.margin_pct / 100)}</span>
                   </div>
                 )}
                 <div className="border-t border-gray-700 pt-2 mt-1 space-y-1">
                   <div className="flex justify-between font-semibold text-gray-100 text-base">
                     <span>Monthly subscription fee</span>
-                    <span>{fmt(clientPriceChf)}</span>
+                    <span>{fmt(finalMonthlyChf)}</span>
                   </div>
                   <div className="flex justify-between text-gray-400 text-sm">
                     <span>Annual subscription fee</span>
-                    <span>{fmt(clientPriceChf * 12)}</span>
+                    <span>{fmt(finalAnnualChf)}</span>
                   </div>
                   {form.output_currency_code !== 'CHF' && (
                     <div className="flex justify-between text-gray-500 text-xs pt-1">
                       <span>In CHF</span>
-                      <span>{fmtChf(clientPriceChf)} / mo · {fmtChf(clientPriceChf * 12)} / yr</span>
+                      <span>{fmtChf(finalMonthlyChf)} / mo · {fmtChf(finalAnnualChf)} / yr</span>
                     </div>
                   )}
                 </div>
@@ -1193,26 +1477,18 @@ export default function QuoteWizard({
         </div>
       </div>
 
-      {/* Sticky live preview — visible when internalCostChf > 0 */}
-      {internalCostChf > 0 && (
-        <div className="fixed bottom-6 right-6 z-50 bg-gray-900 border border-gray-600 rounded-xl shadow-2xl p-4 w-72">
+      {/* Sticky live preview — Pricing step only, hides on Review so it never covers Save/Finalize */}
+      {finalAnnualChf > 0 && step === 3 && (
+        <div className="fixed bottom-24 right-6 z-50 bg-gray-900 border border-gray-600 rounded-xl shadow-2xl p-4 w-72">
           <p className="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-3">Live preview</p>
           <div className="space-y-2">
             <div className="flex justify-between items-baseline">
-              <span className="text-xs text-gray-500">Internal / mo</span>
-              <span className="text-sm font-medium text-gray-300">{fmt(internalCostChf)}</span>
+              <span className="text-xs text-gray-400">Monthly</span>
+              <span className="text-base font-bold text-gray-100">{fmt(finalMonthlyChf)}</span>
             </div>
             <div className="flex justify-between items-baseline border-t border-gray-700 pt-2">
-              <span className="text-xs text-gray-400">
-                Client / mo
-                {form.margin_pct > 0 && <span className="ml-1 text-green-400">+{form.margin_pct}%</span>}
-                {form.discount_pct > 0 && <span className="ml-1 text-orange-400">−{form.discount_pct}%</span>}
-              </span>
-              <span className="text-sm font-medium text-gray-300">{fmt(clientPriceChf)}</span>
-            </div>
-            <div className="flex justify-between items-baseline">
-              <span className="text-xs text-gray-400">Client / yr</span>
-              <span className="text-base font-bold text-gray-100">{fmt(clientPriceChf * 12)}</span>
+              <span className="text-xs text-gray-400">Annual</span>
+              <span className="text-lg font-bold text-gray-100">{fmt(finalAnnualChf)}</span>
             </div>
           </div>
         </div>

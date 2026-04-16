@@ -1,8 +1,11 @@
-import { createClient } from '@/app/lib/supabase/server'
+import { auth } from '@/app/lib/auth'
 import { redirect, notFound } from 'next/navigation'
+import { db, dec, fromJson } from '@/app/lib/db'
 import NavBar from '@/app/components/NavBar'
 import Link from 'next/link'
 import TemplateToggleButton from '@/app/components/TemplateToggleButton'
+import SendEmailForm from '@/app/components/SendEmailForm'
+
 
 function fmtChf(n: number) {
   return `CHF ${n.toLocaleString('de-CH', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
@@ -29,78 +32,94 @@ const CRITICALITY_LABELS: Record<number, string> = {
 
 export default async function QuoteDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect('/login')
+  const session = await auth()
+  if (!session?.user) redirect('/login')
+  const { user } = session
 
-  const { data: quote } = await supabase
-    .from('quotes')
-    .select(`
-      *,
-      service_types (name, slug),
-      delivery_locations (name, hourly_rate_chf),
-      support_levels (name, code, uplift_decimal),
-      coverage_options (name, code, uplift_decimal),
-      sla_sizes (name, code, uplift_decimal)
-    `)
-    .eq('id', id)
-    .single()
-
+  const quote = await db.quotes.findUnique({
+    where: { id },
+    include: {
+      service_types:      { select: { name: true, slug: true } },
+      delivery_locations: { select: { name: true, hourly_rate_chf: true } },
+      support_levels:     { select: { name: true, code: true, uplift_decimal: true } },
+      coverage_options:   { select: { name: true, code: true, uplift_decimal: true } },
+      sla_sizes:          { select: { name: true, code: true, uplift_decimal: true } },
+    },
+  })
   if (!quote) notFound()
 
-  const { data: currency } = await supabase
-    .from('currencies')
-    .select('symbol')
-    .eq('code', quote.output_currency_code ?? 'CHF')
-    .single()
+  const [currencyRow, quoteServices, complexityScoresRaw] = await Promise.all([
+    db.currencies.findFirst({
+      where:  { code: quote.output_currency_code ?? 'CHF' },
+      select: { symbol: true },
+    }),
+    db.quote_services.findMany({
+      where:   { quote_id: id },
+      include: {
+        services: {
+          // Cannot mix select + include at same level in Prisma — use nested select only
+          select: {
+            id:                 true,
+            name:               true,
+            service_categories: { select: { name: true } },
+          },
+        },
+      },
+    }),
+    db.complexity_scores.findMany({
+      where:   { quote_id: id },
+      // orderBy on a relation field is not reliably supported in SQL Server — sort in JS
+      include: { complexity_categories: { select: { name: true, weight: true, sort_order: true } } },
+    }),
+  ])
 
-  const { data: quoteServices } = await supabase
-    .from('quote_services')
-    .select('services (id, name, service_categories (name))')
-    .eq('quote_id', id)
+  // Deserialise JSON snapshot (stored as NVarChar in SQL Server)
+  const rates = fromJson<Record<string, number>>(quote.exchange_rate_snapshot, {})
 
-  const { data: complexityScores } = await supabase
-    .from('complexity_scores')
-    .select('score, complexity_categories (name, weight)')
-    .eq('quote_id', id)
-    .order('complexity_categories(sort_order)')
-
-  const rates = (quote.exchange_rate_snapshot as Record<string, number>) || {}
   const outCode   = quote.output_currency_code ?? 'CHF'
-  const outSymbol = currency?.symbol ?? outCode
+  const outSymbol = currencyRow?.symbol ?? outCode
   const exRate    = rates[outCode] ?? 1
 
   const hasNewPricing    = quote.client_price_chf != null
-  const clientMonthChf   = Number(hasNewPricing ? quote.client_price_chf : quote.final_price_chf) || 0
-  const internalMonthChf = Number(hasNewPricing ? quote.internal_cost_chf : quote.final_price_chf) || 0
-  const marginPct        = Number(quote.margin_pct ?? 0)
-  const discountPct      = Number(quote.discount_pct ?? 0)
-  const contractYears    = Number(quote.contract_duration_years ?? 3)
+  const clientMonthChf   = dec(hasNewPricing ? quote.client_price_chf : quote.final_price_chf)
+  const internalMonthChf = dec(hasNewPricing ? quote.internal_cost_chf : quote.final_price_chf)
+  const marginPct        = dec(quote.margin_pct)
+  const discountPct      = dec(quote.discount_pct)
+  const contractYears    = quote.contract_duration_years ?? 3
 
-  const monthlyChf  = clientMonthChf
-  const annualChf   = monthlyChf * 12
-  const monthlyOut  = monthlyChf * exRate
-  const annualOut   = annualChf * exRate
+  const monthlyChf = clientMonthChf
+  const annualChf  = monthlyChf * 12
+  const monthlyOut = monthlyChf * exRate
+  const annualOut  = annualChf  * exRate
 
-  const loc     = quote.delivery_locations  as { name: string; hourly_rate_chf: number } | null
-  const support = quote.support_levels      as { name: string; uplift_decimal: number } | null
-  const cov     = quote.coverage_options    as { name: string; uplift_decimal: number } | null
-  const sla     = quote.sla_sizes           as { name: string; uplift_decimal: number } | null
+  const loc     = quote.delivery_locations ? { name: quote.delivery_locations.name, hourly_rate_chf: dec(quote.delivery_locations.hourly_rate_chf) } : null
+  const support = quote.support_levels     ? { name: quote.support_levels.name, uplift_decimal: dec(quote.support_levels.uplift_decimal) } : null
+  const cov     = quote.coverage_options   ? { name: quote.coverage_options.name, uplift_decimal: dec(quote.coverage_options.uplift_decimal) } : null
+  const sla     = quote.sla_sizes          ? { name: quote.sla_sizes.name, uplift_decimal: dec(quote.sla_sizes.uplift_decimal) } : null
 
-  const isOwner    = quote.user_id === user.id
+  const isOwner     = quote.user_id === user.id
   const isFinalized = quote.status === 'finalized'
 
   const staffing = [
-    { label: 'Service Manager',       fte: Number(quote.service_manager_fte ?? 0) },
-    { label: 'Application Engineer',  fte: Number(quote.app_engineer_fte ?? 0) },
-    { label: 'SRE / DevOps Engineer', fte: Number(quote.sre_devops_fte ?? 0) },
+    { label: 'Service Manager',       fte: dec(quote.service_manager_fte) },
+    { label: 'Application Engineer',  fte: dec(quote.app_engineer_fte) },
+    { label: 'SRE / DevOps Engineer', fte: dec(quote.sre_devops_fte) },
   ]
   const hasStaffingBreakdown = staffing.some(r => r.fte > 0)
-  const totalFte = Number(quote.fte_estimate ?? 0)
+  const totalFte = dec(quote.fte_estimate)
+
+  const complexityScores = complexityScoresRaw
+    .sort((a, b) => (a.complexity_categories?.sort_order ?? 0) - (b.complexity_categories?.sort_order ?? 0))
+    .map(cs => ({
+      score: dec(cs.score),
+      complexity_categories: cs.complexity_categories
+        ? { name: cs.complexity_categories.name, weight: dec(cs.complexity_categories.weight) }
+        : null,
+    }))
 
   return (
     <div className="min-h-screen bg-gray-900">
-      <NavBar userEmail={user.email ?? ''} />
+      <NavBar userEmail={user.email} />
 
       <main className="max-w-5xl mx-auto px-4 sm:px-6 py-10">
         {/* Header */}
@@ -119,7 +138,7 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
               <p className="text-sm text-gray-500 mt-0.5">{quote.client_name}</p>
             )}
           </div>
-          <div className="flex items-center gap-3 mt-1">
+          <div className="flex flex-wrap items-center gap-3 mt-1">
             {isOwner && (
               <TemplateToggleButton
                 quoteId={quote.id}
@@ -137,6 +156,9 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
               </svg>
               Clone
             </Link>
+            {isFinalized && (
+              <SendEmailForm quoteId={quote.id} defaultEmail={user.email ?? undefined} />
+            )}
           </div>
         </div>
 
@@ -159,7 +181,7 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
                 <div>
                   <p className="text-gray-500">Service type</p>
                   <p className="font-medium text-gray-100 mt-0.5">
-                    {(quote.service_types as { name: string } | null)?.name ?? '—'}
+                    {quote.service_types?.name ?? '—'}
                   </p>
                 </div>
                 <div>
@@ -168,12 +190,12 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
                 </div>
                 <div>
                   <p className="text-gray-500">Created at</p>
-                  <p className="font-medium text-gray-100 mt-0.5">{fmtDatetime(quote.created_at)}</p>
+                  <p className="font-medium text-gray-100 mt-0.5">{fmtDatetime(quote.created_at.toISOString())}</p>
                 </div>
                 {isFinalized && quote.finalized_at && (
                   <div>
                     <p className="text-gray-500">Finalized at</p>
-                    <p className="font-medium text-gray-100 mt-0.5">{fmtDatetime(quote.finalized_at)}</p>
+                    <p className="font-medium text-gray-100 mt-0.5">{fmtDatetime(quote.finalized_at.toISOString())}</p>
                   </div>
                 )}
                 {isFinalized && (
@@ -212,7 +234,7 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
                 </div>
               </div>
 
-              {complexityScores && complexityScores.length > 0 && (
+              {complexityScores.length > 0 && (
                 <div>
                   <p className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">Complexity scores</p>
                   <div className="border border-gray-700 rounded-lg overflow-hidden">
@@ -227,14 +249,13 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
                       </thead>
                       <tbody>
                         {complexityScores.map((cs, i) => {
-                          const cat = cs.complexity_categories as unknown as { name: string; weight: number } | null
-                          if (!cat) return null
+                          if (!cs.complexity_categories) return null
                           return (
                             <tr key={i} className={`border-b border-gray-700 ${i % 2 === 0 ? 'bg-gray-800' : 'bg-gray-700/30'}`}>
-                              <td className="px-3 py-2 text-gray-300 text-xs">{cat.name}</td>
-                              <td className="px-3 py-2 text-center text-xs text-gray-500">{cat.weight}</td>
+                              <td className="px-3 py-2 text-gray-300 text-xs">{cs.complexity_categories.name}</td>
+                              <td className="px-3 py-2 text-center text-xs text-gray-500">{cs.complexity_categories.weight}</td>
                               <td className="px-3 py-2 text-center text-xs font-medium text-gray-100">{cs.score}</td>
-                              <td className="px-3 py-2 text-center text-xs text-gray-400">{(cs.score * cat.weight).toFixed(2)}</td>
+                              <td className="px-3 py-2 text-center text-xs text-gray-400">{(cs.score * cs.complexity_categories.weight).toFixed(2)}</td>
                             </tr>
                           )
                         })}
@@ -245,30 +266,39 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
               )}
             </div>
 
-            {/* Services in scope */}
-            {quoteServices && quoteServices.length > 0 && (
-              <div className="bg-gray-800 rounded-lg border border-gray-700 p-5">
-                <h2 className="text-sm font-semibold text-gray-200 mb-3">
-                  Services in scope
-                  <span className="ml-2 text-gray-500 font-normal">({quoteServices.length})</span>
-                </h2>
-                <div className="space-y-1.5">
-                  {quoteServices.map((qs, i) => {
-                    const svc = qs.services as unknown as { id: string; name: string; service_categories: { name: string } | null } | null
-                    if (!svc) return null
-                    return (
-                      <div key={i} className="flex items-center gap-2 text-sm">
-                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500 flex-shrink-0" />
-                        <span className="text-gray-300">{svc.name}</span>
-                        {svc.service_categories && (
-                          <span className="text-gray-600 text-xs">· {svc.service_categories.name}</span>
-                        )}
+            {/* Services in scope — grouped by category */}
+            {quoteServices.length > 0 && (() => {
+              // Group services by category name
+              const grouped = quoteServices.reduce<Record<string, string[]>>((acc, qs) => {
+                const cat = qs.services.service_categories?.name ?? 'Other'
+                if (!acc[cat]) acc[cat] = []
+                acc[cat].push(qs.services.name)
+                return acc
+              }, {})
+              return (
+                <div className="bg-gray-800 rounded-lg border border-gray-700 p-5">
+                  <h2 className="text-sm font-semibold text-gray-200 mb-3">
+                    Services in scope
+                    <span className="ml-2 text-gray-500 font-normal">({quoteServices.length})</span>
+                  </h2>
+                  <div className="space-y-3">
+                    {Object.entries(grouped).map(([category, services]) => (
+                      <div key={category}>
+                        <p className="text-xs font-semibold text-blue-400 uppercase tracking-wide mb-1.5">{category}</p>
+                        <div className="space-y-1">
+                          {services.map((name, i) => (
+                            <div key={i} className="flex items-center gap-2 text-sm">
+                              <span className="w-1.5 h-1.5 rounded-full bg-blue-500 flex-shrink-0" />
+                              <span className="text-gray-300">{name}</span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    )
-                  })}
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              )
+            })()}
           </div>
 
           {/* Right column — pricing */}
